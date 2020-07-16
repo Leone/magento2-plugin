@@ -218,6 +218,9 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
         $this->_resourceConfig->saveConfig('sendinblue/api_sms_shipment_status', 0, $this->_scopeTypeDefault, $this->_storeId);
         $this->_resourceConfig->saveConfig('sendinblue/api_sms_campaign_status', 0, $this->_scopeTypeDefault, $this->_storeId);
         $this->_resourceConfig->saveConfig('sendinblue/api_sms_order_status', 0, $this->_scopeTypeDefault, $this->_storeId);
+        $this->_resourceConfig->saveConfig('sendinblue/sib_automation_key', '', $this->_scopeTypeDefault, $this->_storeId);
+        $this->_resourceConfig->saveConfig('sendinblue/sib_track_status', 0, $this->_scopeTypeDefault, $this->_storeId);
+        $this->_resourceConfig->saveConfig('sendinblue/sib_automation_enable', '', $this->_scopeTypeDefault, $this->_storeId);
     }
 
     /**
@@ -398,7 +401,6 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     {
         $emailValue = $this->getSubscribeCustomer();
         $mediaUrl = $this->_storeManagerInterface->getStore()->getBaseUrl(\Magento\Framework\UrlInterface::URL_TYPE_MEDIA);
-        $fileName = $this->getDbData('sendin_csv_file_name');
         $apiKey = !empty($this->apiKey) ? $this->apiKey : $this->getDbData('api_key');
         if ($emailValue > 0 && !empty($apiKey)) {
             $this->updateDbData('import_old_user_status', 1);
@@ -406,7 +408,7 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
             $listIdVal = explode('|', $listId);
             $mailinObj = $this->createObjMailin($apiKey);
             $userDataInformation['key'] = $apiKey;
-            $userDataInformation['url'] = $mediaUrl.'sendinblue_csv/'.$fileName.'.csv';
+            $userDataInformation['url'] = $mediaUrl.'sendinblue_csv/ImportSubUsersToSendinblue.csv';
             $userDataInformation['listids'] = $listIdVal; // $list;
             $userDataInformation['notify_url'] = '';
             $responseValue = $mailinObj->importUsers($userDataInformation);
@@ -433,31 +435,28 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
         $customerAddressData = array();
         $attributesName = $this->allAttributesName();
         $collection = $this->getCollection();
+
         $objectManager = \Magento\Framework\App\ObjectManager::getInstance();
         foreach ($collection as $customers) {
             $customerData = $customers->getData();
-            $email  = $customerData['email'];
+            $email = $customerData['email'];
             $customerId = $customerData['entity_id'];
-            $billingId =  $customers->getDefaultBilling();
+            $billingId = $customers->getDefaultBilling();
             $customerAddress = array();
             if (!empty($billingId)) {
                 $address = $objectManager->create('Magento\Customer\Model\Address')->load($billingId);
                 $telephone = '';
-                $street = $address->getStreet();
-                $streetValue = '';
-                foreach ($street as $streetData){
-                    $streetValue.= $streetData.' ';
-                }
+                $streetValue = implode(' ', $address->getStreet());
 
-                $customerAddress['telephone'] = !empty($address->getTelephone()) ? $address->getTelephone() : '';
-                $customerAddress['country_id'] = !empty($address->getCountry()) ? $address->getCountry() : '';
-                $customerAddress['company'] = !empty($address->getCompany()) ? $address->getCompany() : '';
+                $customerAddress['telephone'] = !empty($telephone = $address->getTelephone()) ? $telephone : '';
+                $customerAddress['country_id'] = !empty($country = $address->getCountry()) ? $country : '';
+                $customerAddress['company'] = !empty($company = $address->getCompany()) ? $company : '';
                 $customerAddress['street'] = !empty($streetValue) ? $streetValue : '';
-                $customerAddress['postcode'] = !empty($address->getPostcode()) ? $address->getPostcode() : '';
-                $customerAddress['region'] = !empty($address->getRegion()) ? $address->getRegion() : '';
-                $customerAddress['city'] = !empty($address->getCity()) ? $address->getCity() : '';
+                $customerAddress['postcode'] = !empty($postcode = $address->getPostcode()) ? $postcode : '';
+                $customerAddress['region'] = !empty($region = $address->getRegion()) ? $region : '';
+                $customerAddress['city'] = !empty($city = $address->getCity()) ? $city : '';
             }
-            $customerAddress['client'] = $customerId>0?1:0;
+            $customerAddress['client'] = $customerId > 0 ? 1 : 0;
             $customerAddressData[$email] = array_merge($customerData, $customerAddress);
         }
 
@@ -467,51 +466,50 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
         $tblNewsletter = $this->tbWithPrefix('newsletter_subscriber');
         $resultSubscriber = $connection->fetchAll('SELECT * FROM `'.$tblNewsletter.'` WHERE subscriber_status=1');
 
-        foreach ($resultSubscriber as $subsdata){
+        $stores = $this->_storeManagerInterface->getStores(true, false);
+        $storeNames = array();
+        foreach ($stores as $store) {
+            $storeNames[$store->getId()] = $store->getName();
+        }
+
+        foreach ($resultSubscriber as $subsdata) {
             $subscriberEmail = $subsdata['subscriber_email'];
-            
-            if ( !empty($customerAddressData[$subscriberEmail]) ) {
+
+            if (!empty($customerAddressData[$subscriberEmail])) {
                 $customerAddressData[$subscriberEmail]['email'] = $subscriberEmail;
                 $responseByMerge[$count] = $this->mergeMyArray($attributesName, $customerAddressData[$subscriberEmail], $subscriberEmail);
-            }
-            else {
-                $newsLetterData['client'] = $subsdata['customer_id']>0?1:0;
-                $responseByMerge[$count] = $this->mergeMyArray($attributesName, $newsLetterData, $subscriberEmail);
-                $responseByMerge[$count]['STORE_ID'] = $subsdata['store_id'];
+            } else {
                 $storeId = $subsdata['store_id'];
-                $stores = $this->_storeManagerInterface->getStores(true, false);
-                foreach ($stores as $store){
-                    if ($store->getId() == $storeId) {
-                        $storeView = $store->getName();
-                    }
-                }
-                $responseByMerge[$count]['MAGENTO_LANG'] = $storeView;
+                $newsLetterData['client'] = $subsdata['customer_id'] > 0 ? 1 : 0;
+                $responseByMerge[$count] = $this->mergeMyArray($attributesName, $newsLetterData, $subscriberEmail);
+                $responseByMerge[$count]['STORE_ID'] = $storeId;
+                $responseByMerge[$count]['MAGENTO_LANG'] = isset($storeNames[$storeId]) ? $storeNames[$storeId] : '';
             }
-            $count++;                
+            ++$count;
         }
 
         if (!is_dir($this->_dir->getPath('media').'/sendinblue_csv')) {
             mkdir($this->_dir->getPath('media').'/sendinblue_csv', 0777, true);
         }
-		$fileName = rand();
-		$this->updateDbData('sendin_csv_file_name', $fileName);
+        $fileName = 'ImportContacts-'.time();
+        $this->updateDbData('sendin_csv_file_name', $fileName);
         $handle = fopen($this->_dir->getPath('media').'/sendinblue_csv/'.$fileName.'.csv', 'w+');
-        $keyValue = array_keys($attributesName);
-        array_splice($keyValue, 0, 0, 'EMAIL');
-        fwrite($handle, implode(';', $keyValue)."\n");
+        $headRow = array_keys($attributesName);
+        array_splice($headRow, 0, 0, 'EMAIL');
+        fwrite($handle, implode(';', $headRow)."\n");
 
-        foreach ($responseByMerge as $newsdata) {
-            if(!empty($newsdata['COUNTRY_ID']) && !empty($newsdata['SMS'])) {
-                $countryId = $this->getCountryCode($newsdata['COUNTRY_ID']);
+        foreach ($responseByMerge as $row) {
+            if (!empty($row['COUNTRY_ID']) && !empty($row['SMS'])) {
+                $countryId = $this->getCountryCode($row['COUNTRY_ID']);
                 if (!empty($countryId)) {
-                    $newsdata['SMS'] = $this->checkMobileNumber($newsdata['SMS'], $countryId);
+                    $row['SMS'] = $this->checkMobileNumber($row['SMS'], $countryId);
                 }
             }
-            $keyValue = $newsdata;
-            fwrite($handle, str_replace("\n", "",implode(';', $keyValue))."\n");
+            fwrite($handle, str_replace("\n", '', implode(';', $row))."\n");
         }
         fclose($handle);
         $totalValue = count($responseByMerge);
+
         return $totalValue;
     }
 
@@ -771,9 +769,7 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
                 mkdir($this->_dir->getPath('media').'/sendinblue_csv', 0777, true);
             }
 
-            $fileName = rand();
-            $this->updateDbData('sendin_csv_file_name', $fileName);
-            $handle = fopen($this->_dir->getPath('media').'/sendinblue_csv/'.$fileName.'.csv', 'w+');
+            $handle = fopen($this->_dir->getPath('media').'/sendinblue_csv/ImportOldOrdersToSendinblue.csv', 'w+');
             fwrite($handle, 'EMAIL;ORDER_ID;ORDER_PRICE;ORDER_DATE'.PHP_EOL);
             $collection = $this->getCollection();
             $objectManager = \Magento\Framework\App\ObjectManager::getInstance();
@@ -815,9 +811,8 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
             $listIdVal = explode('|', $listId);
             $mailinObj = $this->createObjMailin($apiKey);
             $baseUrl = $this->_storeManagerInterface->getStore()->getBaseUrl(\Magento\Framework\UrlInterface::URL_TYPE_MEDIA);
-            $fileName = $this->getDbData('sendin_csv_file_name');
             $userDataInformation['key'] = $apiKey;
-            $userDataInformation['url'] = $baseUrl.'sendinblue_csv/'.$fileName.'.csv';
+            $userDataInformation['url'] = $baseUrl.'sendinblue_csv/ImportOldOrdersToSendinblue.csv';
             $userDataInformation['listids'] = $listIdVal; // $list;
             $userDataInformation['notify_url'] = '';
             $responseValue = $mailinObj->importUsers($userDataInformation);
@@ -966,9 +961,7 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
             $dataFinal = array( "to" => trim($dataSms['to']),
                     "from" => trim($dataSms['from']),
                     "text" => trim($dataSms['text']),
-                    "type" => trim($dataSms['type']),
-                    "source" => 'api',
-                    "plugin" => 'magento2-plugin'
+                    "type" => trim($dataSms['type'])
                 );
             $dataResp = $mailin->sendSms($dataFinal);
 

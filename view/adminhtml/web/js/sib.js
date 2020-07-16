@@ -521,6 +521,34 @@ require([
                 });
             });
 
+            $(".sib_track_cls_btn").click(function() {
+                $(this).parents('td').find('.loading-ajax').show();
+                var sib_tracking = jQuery(this).val();
+                var sib_track_status = $("input[name='sib_track_status']:checked").val();
+                var form_key = jQuery("#form_key").val();
+                var file_url = jQuery("#ajaxcontentUrl").val();
+                $.ajax({
+                    type: "POST",
+                    async: false,
+                    url: file_url,
+                    data: {
+                        "form_key": form_key,
+                        "sib_track_status": sib_track_status,
+                        "sib_tracking": sib_tracking
+                    },
+                    beforeSend: function() {
+                        $('#ajax-busy').show();
+                    },
+                    success: function(msg) {
+
+                        $('#ajax-busy').hide();
+                        $('.loading-ajax').hide();
+                        alert(msg);
+                    }
+                });
+            });
+
+
             $(".smtptestclickcls").click(function() {
                 $(this).parents('td').find('.loading-ajax').show();
                 var smtp_post = jQuery(this).val();

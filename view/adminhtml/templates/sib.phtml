@@ -49,6 +49,7 @@ $newIconSvg = '<svg viewBox="0 0 512 512" style="width:16px !important; height:1
                 <li><a data-id="#about-sendinblue" id="about-sendinblue" href="javascript:void(0)" class="active"><?php echo __('About Sendinblue'); ?></a></li>
                 <li><a data-id="#subscribe-manager" id="subscribe-manager" href="javascript:void(0)"><?php echo __('Subscribe Manager'); ?></a></li>
                 <li><a data-id="#code-tracking" id="code-tracking" href="javascript:void(0)"><?php echo __('Code tracking'); ?></a></li>
+                <li><a data-id="#sendinblue-tracking" id="sendinblue-tracking" href="javascript:void(0)"><?php echo __('Sendinblue Tracker'); ?></a></li>
                 <li><a data-id="#transactional-email-sms-management" id="transactional-email-sms-management" href="javascript:void(0)"><?php echo __('Transactional Emails and SMS Management'); ?></a></li>
                 <li><a data-id="#contact-list" id="contact-list" href="javascript:void(0)"><?php echo __('Contact List'); ?></a></li>
             </ul>
@@ -444,6 +445,50 @@ $newIconSvg = '<svg viewBox="0 0 512 512" style="width:16px !important; height:1
                 
                 </div>
                 
+                <!-- Start Automation tracking -->
+                <div class="tab-pane" id="sendinblue-tracking">
+                
+                    <!-- Section Start -->
+                    <div class="form-box">
+                    <h2 class="heading"><?php echo $newIconSvg; ?><?php echo __('Sendinblue Tracker'); ?></h2>
+                     <form action="<?php echo $this->getUrl("sendinblue/index/post");  ?>#sib_tracking" id="sib_tracking" method="post" name="sib_tracking">
+                     <input name="form_key" id="form_key" type="hidden" value="<?php echo $formKey ?>" />
+                    <input name="ajaxcontentUrl" type="hidden" id="ajaxcontentUrl" value="<?php echo $this->getUrl("sendinblue/index/ajax");  ?>" />
+                        <table cellpadding="0" cellspacing="0" class="table tableblock hidetableblock form-data" width="100%">
+                            <tbody>
+                                <tr>
+                                    <td><label><?php echo __('Activate Marketing Automation through Sendinblue'); ?></label> 
+                                    <span class="ver_5">
+                                    <label class="input-label"><input <?php if($model->getDbData('sib_track_status') == 1) { echo "checked"; } ?> class="sibtracking sib_track_cls radio_nospaceing" id="yesradio" name="sib_track_status" type="radio" value="1"> <?php echo __('Yes'); ?> </label>
+                                    <label class="input-label"><input <?php if($model->getDbData('sib_track_status') == 0) { echo "checked"; } ?> class="sibtracking sib_track_cls radio_spaceing2" id="noradio" name="sib_track_status" type="radio" value="0"> <?php echo __('No'); ?></label> 
+                                    <span class="toolTip tooltip-radio" title="<?php echo __('Choose Yes if you want to use Sendinblue Automation to track your website activity'); ?>"></span>
+                                    </span>
+                                    <label class="input-label"><input class="button btn-primary btn btn-xs sib_track_cls_btn" type="button" value="<?php echo __('Update');?>"></label>
+                                    <div class="clearfix"></div>
+                                    <label>&nbsp;</label>
+                                    <div class="loading-ajax" style="display: none; width: auto;"><img src="<?php echo $block->getViewFileUrl('Sendinblue_Sendinblue::images/loadjs.gif'); ?>"></div>
+                                    </td>
+
+                                </tr>
+
+                                <tr>
+                                    <td>
+                                        <label style="width: 100%; max-width: 70rem;">
+                                            <?php echo __('Check this box to insert the Sendinblue Tracker javascript snippet to your website code so you can track your website activity with Sendinblue Automation. Learn more about the Sendinblue Tracker'); ?>
+                                            <a style="color:#337ab7;" href="https://developers.sendinblue.com/docs/gettings-started-with-sendinblue-tracker"><?php echo __('here')?></a>
+                                        </label>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        </form>
+                        </div>
+                    <!-- Section Ends -->
+                    <div class="clearfix"></div>
+                
+                </div>
+
+
                 <div class="tab-pane" id="transactional-email-sms-management">
                 
                 <!-- Section Start -->

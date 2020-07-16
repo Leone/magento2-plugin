@@ -34,6 +34,16 @@ class Ajax extends \Magento\Backend\App\Action
             if (isset($post['ord_track_btn']) && !empty($post['ord_track_btn'])) {
                 $this->ajaxOrderStatus();
             }
+            if (isset($post['sib_tracking']) && !empty($post['sib_tracking'])) {
+                if ($post['sib_track_status'] == 1) {
+                    $this->automationEnable();
+                } else {
+                    $model->updateDbData('sib_track_status', $post['sib_track_status']);
+                    $msgVal = __('Your setting has been successfully saved');
+                    $this->getResponse()->setHeader('Content-type', 'application/text');
+                    $this->getResponse()->setBody($msgVal);
+                }
+            }
             //SMTP settings enable or disable
             if (isset($post['smtp_post']) && !empty($post['smtp_post'])) {
                 if ($post['smtps_tatus'] == 1) {
@@ -206,6 +216,29 @@ class Ajax extends \Magento\Backend\App\Action
         $msgVal = __('Sendiblue configuration setting Successfully updated');
         $this->getResponse()->setHeader('Content-type', 'application/text');
         $this->getResponse()->setBody($msgVal);
+    }
+
+    public function automationEnable() {
+        $post = $this->getRequest()->getPostValue();
+        if (!$post) {
+            $this->_redirect('sendinblue/sib/index');
+            return;
+        }
+        $model = $this->sibObject();
+        $trackResp = $model->trackingSmtp();
+        if (isset($trackResp['data']['marketing_automation']['key']) && $trackResp['data']['marketing_automation']['enabled'] == 1) {
+            $model->updateDbData('sib_track_status', $post['sib_track_status']);
+            $model->updateDbData('sib_automation_key', $trackResp['data']['marketing_automation']['key']);
+            $model->updateDbData('sib_automation_enable', $trackResp['data']['marketing_automation']['enabled']);
+            $msgVal = __('Sendiblue configuration setting Successfully updated');
+            $this->getResponse()->setHeader('Content-type', 'application/text');
+            $this->getResponse()->setBody($msgVal);
+        } else {
+            $model->updateDbData('sib_track_status', 0);
+            $msgVal = __("To activate Marketing Automation , please go to your Sendinblue's account or contact us at contact@sendinblue.com");
+            $this->getResponse()->setHeader('Content-type', 'application/text');
+            $this->getResponse()->setBody($msgVal);
+        }
     }
 
     public function ajaxSmtpStatus()
