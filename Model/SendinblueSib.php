@@ -14,6 +14,9 @@ use Sendinblue\Sendinblue\Helper\ConfigHelper;
 
 class SendinblueSib extends \Magento\Framework\Model\AbstractModel
 {
+    /** Constant for plugin name */
+    const PLUGIN_NAME = "magento_2";
+
     /** @var  ConfigHelper */
     public $_resourceConfig;
     public $_getValueDefault;
@@ -28,6 +31,8 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     public $_getTb;
     public $_storeId;
     public $_blocktemp;
+    // Holds APi key value in multiple objects
+    public static $apiV3Key;
 
     public function __construct(
         \Magento\Config\Model\ResourceModel\Config $resourceConfig,
@@ -55,6 +60,10 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
         $this->_storeManagerInterface = $storeManagerInterface;
         $this->_getTb = $getTb;
         $this->_blocktemp = $blocktemp;
+        /**
+        * To create Api v3 by v2. When someone update our plugin
+        */
+        $this->checkAndCreateV3byV2();
     }
     public function getCurrentUser()
     {
@@ -71,38 +80,68 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     * @return: smtp details
     * @updated: 09-June-2016
     */
-    public function createFolderName($apiKey)
+    public function createFolderName($key)
     {
-        $this->apiKey = $apiKey;
-        $this->createAttributesName();
-        $result = $this->checkFolderList();
-        if ($result === false) {
-            $data = array();
-            $mailin = $this->createObjMailin($this->apiKey);
-            $data = array( "name"=> "magento" );
-            $folderResponce = $mailin->createFolder($data);
-            $folderId = isset($folderResponce['data']['id']) ? $folderResponce['data']['id'] : '';
-            $existList = '';
-        } else {
-            $folderId = $result['key'];
-            $existList = $result['list_name'];
+        $result = $this->checkFolderList($key);
+
+        if ($result == false) {
+            $mailin = $this->createObjSibClient($key);
+            $response = $mailin->createFolder(array( "name"=> "magento" ));
+            if( SendinblueSibClient::RESPONSE_CODE_CREATED == $mailin->getLastResponseCode() ) {
+                $this->createNewList($key, $response["id"]);
+            }
         }
-        //Create the partner's name i.e. Shopify on Sendinblue platform
-        $this->partnerMagento();
-        // create list in Sendinblue
-        $this->createNewList($folderId, $existList);
+        else {
+            $this->createNewList($key, $result["folder"]["id"], ( empty($result["list"]) ? false : $result["list"]["name"] ));
+        }
     }
 
     /**
-     * Method is used to add the partner's name in Sendinblue.
-     * In this case its "MAGENTO".
+     * Method is used to add the installtion information in Sendinblue.
      */
-    public function partnerMagento()
+    public function processInstallationInfo($action, $key)
     {
-        $mailinPartnerParameters = array();
-        $mailin = $this->createObjMailin($this->apiKey);
-        $mailinPartnerParameters['partner'] = 'MAGENTO';
-        $mailin->updateMailinParter($mailinPartnerParameters);
+        if($action == "login")
+        {
+            $objectManager = \Magento\Framework\App\ObjectManager::getInstance();
+            $productMetadata = $objectManager->get('Magento\Framework\App\ProductMetadataInterface');
+
+            $apiClient = $this->createObjSibClient($key);
+
+            $params["partnerName"] = "MAGENTO";
+            $params["active"] = true;
+            if($apiClient->getPluginVersion())
+            {
+                $params["plugin_version"] = $apiClient->getPluginVersion();
+            }        
+            if($productMetadata->getVersion())
+            {
+                $params["shop_version"] = $productMetadata->getVersion();
+            }
+            $params["shop_url"] = $this->_storeManagerInterface->getStore()->getBaseUrl(\Magento\Framework\UrlInterface::URL_TYPE_WEB);
+            $params["created_at"] = gmdate("Y-m-d\TH:i:s\Z");
+            $params["activated_at"] = gmdate("Y-m-d\TH:i:s\Z");
+            $params["type"] = "sib";
+            $response = $apiClient->createInstallationInfo($params);
+            if ( $apiClient->getLastResponseCode() === SendinblueSibClient::RESPONSE_CODE_CREATED )
+            {
+                if(!empty($response["id"]))
+                {
+                    $this->_resourceConfig->saveConfig('sendinblue/installation_id', $response["id"], $this->_scopeTypeDefault, $this->_storeId);
+                }
+            }
+        }
+        elseif($action == "logout")
+        {       
+            $installationId = $this->_getValueDefault->getValue('sendinblue/installation_id', \Magento\Store\Model\ScopeInterface::SCOPE_STORE);
+            if(!empty($installationId))
+            {
+                $apiClient = $this->createObjSibClient($key);
+                $params["active"] = false;
+                $params["deactivated_at"] = gmdate("Y-m-d\TH:i:s\Z");
+                $apiClient->updateInstallationInfo($installationId, $params);
+            }
+        }
     }
 
     /**
@@ -113,22 +152,17 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     * @return: smtp details
     * @updated: 12-June-2016
     */
-    public function createNewList($response, $existList)
+    public function createNewList($key, $folder, $existList = false)
     {
-        if ($existList != '') {
-            $listName = 'magento_' . date('dmY');
-        } else {
-            $listName = 'magento';
+        $list = 'magento';
+        if($existList) {
+            $list = 'magento'. date('dmY');
         }
-        
-        $data = array();
-        $mailin = $this->createObjMailin($this->apiKey);
-        $data = array(
-          "list_name" => $listName,
-          "list_parent" => $response
-        ); 
-        $listResp = $mailin->createList($data);
-        $this->_resourceConfig->saveConfig('sendinblue/selected_list_data', trim($listResp['data']['id']), $this->_scopeTypeDefault, $this->_storeId);
+        $mailin = $this->createObjSibClient($key);
+        $response = $mailin->createList( array("name" => $list, "folderId" => $folder) );
+        if( SendinblueSibClient::RESPONSE_CODE_CREATED == $mailin->getLastResponseCode() ) {
+            $this->_resourceConfig->saveConfig('sendinblue/selected_list_data', $response['id'], $this->_scopeTypeDefault, $this->_storeId);            
+        }
     }
 
 
@@ -137,12 +171,58 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     */
     public function checkApikey($key)
     {
-        if(!empty($key))
-        {
-            $mailin = $this->createObjMailin($key);
-            $keyResponse = $mailin->getAccount();
+        $mailin = $this->createObjSibClient($key);
+        $keyResponse = $mailin->getAccount();
+        if( SendinblueSibClient::RESPONSE_CODE_OK == $mailin->getLastResponseCode() ) {
+            $resp = $this->pluginDateLangConfig($keyResponse);
+            return $resp;
         }
-        return $keyResponse;
+        return false;
+    }
+
+    /**
+    * This method is used used for date and language set
+    */
+    public function pluginDateLangConfig($account) {
+        $lang = 'en';
+        $date_format = 'dd-mm-yyyy';
+        if( isset($account["address"]["country"]) && "france" == strtolower($account["address"]["country"]) ) {
+            $date_format = 'mm-dd-yyyy';
+            $lang = 'fr';
+        }
+        $this->updateDbData('sendin_config_lang', $lang);
+        $this->updateDbData('sendin_date_format', $date_format);
+        return array("lang" => $lang, "date_format" => $date_format);
+    }
+
+    /**
+     * Description: This method is called to create v3 using v2.
+     */
+    public function checkAndCreateV3byV2()
+    {
+        try {
+            $key_v3 = $this->_getValueDefault->getValue('sendinblue/api_key_v3', \Magento\Store\Model\ScopeInterface::SCOPE_STORE);
+            if( !empty($key_v3) || !empty(SendinblueSib::$apiV3Key) ) {
+                return true;
+            }
+            $key_v2 = $this->_getValueDefault->getValue('sendinblue/api_key', \Magento\Store\Model\ScopeInterface::SCOPE_STORE);
+            if( empty($key_v2) ) {
+                return false;
+            }
+            $mailin = $this->createObjMailin($key_v2);
+            $response = $mailin->generateApiV3Key();
+            if ($response['code'] == 'success') {
+                SendinblueSib::$apiV3Key = $response['data']['value'];
+                $this->_resourceConfig->saveConfig('sendinblue/api_key_v3', $response['data']['value'], $this->_scopeTypeDefault, $this->_storeId);
+            }
+        }
+        catch (\Exception $e) {
+            $this->messageManager->addError(
+                __('API key V3 not created.')
+            );
+            $this->_redirect('sendinblue/sib/index');
+            return;
+        }
     }
 
     Public function getObjRunTime()
@@ -159,22 +239,14 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     * @return: All folder and list id.
     * @updated: 12-June-2016
     */
-    public function getResultListValue($key = false)
+    public function getResultListValue()
     {
-        if (!$key) {
-            $key = $this->_getValueDefault->getValue('sendinblue/api_key', \Magento\Store\Model\ScopeInterface::SCOPE_STORE);
+        $mailin = $this->createObjSibClient();
+        $response = $mailin->getAllLists();
+        if( SendinblueSibClient::RESPONSE_CODE_OK == $mailin->getLastResponseCode() ) {
+            return $response;
         }
-
-        if(!empty($key))
-        {
-            $mailin = $this->createObjMailin($key);
-            $data = array( "page" => '',
-              "page_limit" => ''
-            );
- 
-            $listResp = $mailin->getLists($data);
-            return $listResp;
-        } 
+        return array("lists" => array(), "count" => 0);
     }
 
     /**
@@ -194,6 +266,14 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     }
 
     /**
+    * create object for access data from Sendinblue threw API V3 call.
+    */
+    public function createObjSibClient($key = "")
+    {
+        return new \Sendinblue\Sendinblue\Model\SendinblueSibClient($key);
+    }
+
+    /**
     * Description: Method to factory reset the database value.
     *
     * @author: Amar Pandey <amarpandey@sendinblue.com>
@@ -207,7 +287,7 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
         $this->_resourceConfig->saveConfig('sendinblue/order_import_status', 0, $this->_scopeTypeDefault, $this->_storeId);
         $this->_resourceConfig->saveConfig('sendinblue/api_smtp_status', 0, $this->_scopeTypeDefault, $this->_storeId);
         $this->_resourceConfig->saveConfig('sendinblue/first_request', '', $this->_scopeTypeDefault, $this->_storeId);
-        $this->_resourceConfig->saveConfig('sendinblue/api_key', '', $this->_scopeTypeDefault, $this->_storeId);
+        $this->_resourceConfig->saveConfig('sendinblue/api_key_v3', '', $this->_scopeTypeDefault, $this->_storeId);
         $this->_resourceConfig->saveConfig('sendinblue/selected_list_data', '', $this->_scopeTypeDefault, $this->_storeId);
         $this->_resourceConfig->saveConfig('sendinblue/confirm_type', '', $this->_scopeTypeDefault, $this->_storeId);
         $this->_resourceConfig->saveConfig('sendinblue/doubleoptin_redirect', '', $this->_scopeTypeDefault, $this->_storeId);
@@ -220,7 +300,10 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
         $this->_resourceConfig->saveConfig('sendinblue/api_sms_order_status', 0, $this->_scopeTypeDefault, $this->_storeId);
         $this->_resourceConfig->saveConfig('sendinblue/sib_automation_key', '', $this->_scopeTypeDefault, $this->_storeId);
         $this->_resourceConfig->saveConfig('sendinblue/sib_track_status', 0, $this->_scopeTypeDefault, $this->_storeId);
+        $this->_resourceConfig->saveConfig('sendinblue/sib_abdcart_status', 0, $this->_scopeTypeDefault, $this->_storeId);
         $this->_resourceConfig->saveConfig('sendinblue/sib_automation_enable', '', $this->_scopeTypeDefault, $this->_storeId);
+        $this->_resourceConfig->saveConfig('sendinblue/current_version', '', $this->_scopeTypeDefault, $this->_storeId);
+
     }
 
     /**
@@ -232,42 +315,57 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     * @return: true
     * @updated: 22-June-2016
     */
-    public function createAttributesName()
+    public function createAttributesName($key, $config = "")
     {
-        $apiKey = !empty($this->apiKey) ? $this->apiKey : $this->getDbData('api_key');
-        $valueLanguage = $this->getApiConfigValue();
-        $this->updateDbData('sendin_config_lang', trim($valueLanguage->language));
-        $this->updateDbData('sendin_date_format', trim($valueLanguage->date_format));
-        $noramalAttribute = $this->allAttributesType($valueLanguage->language);        
-        $transactionalAttributes = $this->allTransactionalAttributes();
-        $calcAttribute = $this->attrCalculated(); 
-        $globalAttribute = $this->attrGlobal();
+        $required_attr["normal"] = $this->attrNormal($config);
+        $required_attr["calculated"] = $this->attrCalculated();
+        $required_attr["global"] = $this->attrGlobal();
+        $required_attr["transactional"] = $this->attrTransactional();
 
-        if ($valueLanguage->language == 'fr') {
-            $dataAttr = array('PRENOM'=>'text','NOM'=>'text','CLIENT'=>'number','COMPANY'=>'text','SMS'=>'text','CITY'=>'text','COUNTRY'=>'text','POSTCODE'=>'text','PROVINCE_CODE'=>'text','COUNTRY_CODE'=>'text');
-        } else {
-            $dataAttr = array('NAME'=>'text','SURNAME'=>'text','CLIENT'=>'number','COMPANY'=>'text','SMS'=>'text','CITY'=>'text','COUNTRY'=>'text','POSTCODE'=>'text','PROVINCE_CODE'=>'text','COUNTRY_CODE'=>'text');
+        $mailin = $this->createObjSibClient($key);
+        $attr_list = $mailin->getAttributes();
+        $attr_exist = array();
+
+        if( isset($attr_list["attributes"]) ) {
+            foreach ($attr_list["attributes"] as $key => $value) {
+                if ( !isset($attr_exist[$value["category"]]) ) {
+                   $attr_exist[$value["category"]] = array();
+                }
+                $attr_exist[$value["category"]][] = $value;
+            }
         }
 
-        $mailin = $this->createObjMailin($apiKey);
-        $normal = array( "type" => "normal",
-        "data" => $noramalAttribute
-        );
-        $mailin->createAttribute($normal);
+        // To find which attribute is not created
+        foreach ($required_attr as $key => $value) {
+            if ( isset($attr_exist[$key]) ) {
+                $temp_name = array_column($attr_exist[$key], 'name');
+                foreach ($value as $key1 => $value1) {
+                    if ( in_array($value1["name"], $temp_name) ) {
+                        unset($required_attr[$key][$key1]);
+                    }
+                }
+            }
+        }
 
-        $transactionalAttributes = array('ORDER_ID'=>'id','ORDER_DATE'=>'date','ORDER_PRICE'=>'number');
-        $trans = array( "type" => "transactional",
-        "data" => $transactionalAttributes
-        );
-        $mailin->createAttribute($trans);
+        // To create normal attributes
+        foreach ($required_attr["normal"] as $key => $value) {
+            $mailin->createAttribute("normal", $value["name"], array("type" => $value["type"]));
+        }
 
-        $calculatedValue = array( "type" => "calculated",
-        "data" => $calcAttribute);
-        $mailin->createAttribute($calculatedValue);
+        // To create transactional attributes
+        foreach ($required_attr["transactional"] as $key => $value) {
+            $mailin->createAttribute("transactional", $value["name"], array("type" => $value["type"]));
+        }
 
-        $dataGlobal = array( "type" => "global",
-        "data" => $globalAttribute);
-        $mailin->createAttribute($dataGlobal);
+        // To create calculated attributes
+        foreach ($required_attr["calculated"] as $key => $value) {
+            $mailin->createAttribute("calculated", $value["name"], array("value" => $value["value"]));
+        }
+
+        // To create global attributes
+        foreach ($required_attr["global"] as $key => $value) {
+            $mailin->createAttribute("global", $value["name"], array("value" => $value["value"]));
+        }
     }
 
          /**
@@ -276,7 +374,7 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
      */
     public function allAttributesName()
     {
-        $userLanguage = $this->_getValueDefault->getValue('sendinblue/sendin_config_lang', \Magento\Store\Model\ScopeInterface::SCOPE_STORE);
+        $userLanguage = $this->getDbData('sendin_config_lang');
         if ($userLanguage == 'fr') {
             $attributesName = array('PRENOM'=>'firstname', 'NOM'=>'lastname', 'MAGENTO_LANG'=>'created_in','CLIENT'=>'client','SMS'=>'telephone','COMPANY'=>'company','CITY'=>'city','COUNTRY_ID'=>'country_id','POSTCODE'=>'postcode','STREET'=>'street','REGION'=>'region','STORE_ID'=>'store_id');
         }
@@ -290,53 +388,67 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     * Fetch attributes name and type
     * on Sendinblue platform. This is necessary for the Magento to add subscriber's details.
     */
-    public function allAttributesType($langConfig)
+    public function attrNormal($config = "")
     {
-        if ($langConfig == 'fr') {
-            $attributesType = array('PRENOM'=>'text', 'NOM'=>'text', 'MAGENTO_LANG'=>'text','CLIENT'=>'number','SMS'=>'text','COMPANY'=>'text','CITY'=>'text','COUNTRY_ID'=>'text','POSTCODE'=>'number','STREET'=>'text','REGION'=>'text','STORE_ID'=>'number');
+        if( !empty($config) ) {
+            $langConfig = $config["lang"];
         }
         else {
-            $attributesType = array('NAME'=>'text', 'SURNAME'=>'text', 'MAGENTO_LANG'=>'text','CLIENT'=>'number','SMS'=>'text','COMPANY'=>'text','CITY'=>'text','COUNTRY_ID'=>'text','POSTCODE'=>'number','STREET'=>'text','REGION'=>'text','STORE_ID'=>'number');
+            $langConfig = $this->getDbData('sendin_config_lang');
+        }
+        $attributesType = array(
+                            array("name"=>"MAGENTO_LANG","category"=>"normal","type"=>"text"),
+                            array("name"=>"CLIENT","category"=>"normal","type"=>"float"),
+                            array("name"=>"SMS","category"=>"normal","type"=>"text"),
+                            array("name"=>"COMPANY","category"=>"normal","type"=>"text"),
+                            array("name"=>"CITY","category"=>"normal","type"=>"text"),
+                            array("name"=>"COUNTRY_ID","category"=>"normal","type"=>"text"),
+                            array("name"=>"POSTCODE","category"=>"normal","type"=>"float"),
+                            array("name"=>"STREET","category"=>"normal","type"=>"text"),
+                            array("name"=>"REGION","category"=>"normal","type"=>"text"),
+                            array("name"=>"STORE_ID","category"=>"normal","type"=>"float"),
+                            array("name"=>"PLUGIN","category"=>"normal","type"=>"text"),
+                        );
+        if ($langConfig == 'fr') {
+            $attributesType[] = array("name"=>"PRENOM","category"=>"normal","type"=>"text");
+            $attributesType[] = array("name"=>"NOM","category"=>"normal","type"=>"text");
+        }
+        else {
+            $attributesType[] = array("name"=>"NAME","category"=>"normal","type"=>"text");
+            $attributesType[] = array("name"=>"SURNAME","category"=>"normal","type"=>"text");
         }
         return $attributesType;
     }
 
     public function attrCalculated() {
-        $calcAttr = array('[{ "name":"MAGENTO_LAST_30_DAYS_CA", "value":"SUM[ORDER_PRICE,ORDER_DATE,>,NOW(-30)]" }, {"name":"MAGENTO_ORDER_TOTAL", "value":"COUNT[ORDER_ID]"}, {"name":"MAGENTO_CA_USER", "value":"SUM[ORDER_PRICE]"}]');
+        $calcAttr = array(
+                        array("name"=>"MAGENTO_LAST_30_DAYS_CA","category"=>"calculated","value"=>"SUM[ORDER_PRICE,ORDER_DATE,>,NOW(-30)]"),
+                        array("name"=>"MAGENTO_ORDER_TOTAL","category"=>"calculated","value"=>"COUNT[ORDER_ID]"),
+                        array("name"=>"MAGENTO_CA_USER","category"=>"calculated","value"=>"SUM[ORDER_PRICE]")
+                    );
         return $calcAttr;
     }
 
     public function attrGlobal() {
-        $globalAttr = array('[{ "name":"MAGENTO_CA_LAST_30DAYS", "value":"SUM[MAGENTO_LAST_30_DAYS_CA]" }, { "name":"MAGENTO_CA_TOTAL", "value":"SUM[ORDER_USER]"}, { "name":"MAGENTO_ORDERS_COUNT", "value":"SUM[MAGENTO_ORDER_TOTAL]"}]');
+        $globalAttr = array(
+                        array("name"=>"MAGENTO_CA_LAST_30DAYS","category"=>"global","value"=>"SUM[MAGENTO_LAST_30_DAYS_CA]"),
+                        array("name"=>"MAGENTO_CA_TOTAL","category"=>"global","value"=>"SUM[MAGENTO_CA_USER]"),
+                        array("name"=>"MAGENTO_ORDERS_COUNT","category"=>"global","value"=>"SUM[MAGENTO_ORDER_TOTAL]")
+                    );
         return $globalAttr;
     }
     /**
     * Fetch all Transactional Attributes 
     * on Sendinblue platform. This is necessary for the Magento to add subscriber's details.
     */
-    public function allTransactionalAttributes()
+    public function attrTransactional()
     {
-        $transactionalAttributes = array('ORDER_ID'=>'id', 'ORDER_DATE'=>'date', 'ORDER_PRICE'=>'number');
+        $transactionalAttributes = array(
+                                    array("name"=>"ORDER_ID","category"=>"transactional","type"=>"id"),
+                                    array("name"=>"ORDER_DATE","category"=>"transactional","type"=>"date"),
+                                    array("name"=>"ORDER_PRICE","category"=>"transactional","type"=>"float")
+                                );
         return $transactionalAttributes;
-    }
-
-    /**
-    * Description: API config value from Sendinblue with date format.
-    *
-    * @author: Amar Pandey <amarpandey@sendinblue.com>
-    * @param: storeID
-    * @return: config value from sib
-    * @updated: 18-July-2016
-    */
-    public function getApiConfigValue()
-    {
-        $result = array();
-        $apiKey = !empty($this->apiKey) ? $this->apiKey : $this->getDbData('api_key');
-        if(!empty($apiKey)) {
-            $mailin = $this->createObjMailin($apiKey);
-            $result = $mailin->getPluginConfig();
-        }
-        return (object)$result['data'];
     }
 
     /**
@@ -348,44 +460,37 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     * @return: all sib List ID with name
     * @updated: 12-June-2016
     */
-    public function checkFolderList()
+    public function checkFolderList($key)
     {
-        $data = array();
-        $apiKey = !empty($this->apiKey) ? $this->apiKey : $this->getDbData('api_key');
-        if ($apiKey == '') {
-            return false;
-        }
-        $mailin = $this->createObjMailin($apiKey);
-        $dataApi = array( "page" => 1,
-          "page_limit" => 50
-        );
-        $listResp = $mailin->getFolders($dataApi);
-        
-        //folder id
-        $sortArray = array();
-        $returnFolderList = false;
-        if (!empty($listResp['data']['folders'])) {
-            foreach ($listResp['data']['folders'] as $value) {
+        $mailin = $this->createObjSibClient($key);
+        $response = $mailin->getFoldersAll();
+        $list_folder = array();
+        $folder = array();
+
+        if (isset($response["folders"])) {
+            foreach ($response["folders"] as $value) {
                 if (strtolower($value['name']) == 'magento') {
-                    $sortArray['key'] = $value['id'];
-                    $sortArray['list_name'] = $value['name'];
-                    if (!empty($value['lists'])) {
-                        foreach ($value['lists'] as $val) {
-                            if (strtolower($val['name']) == 'magento') {
-                                $sortArray['folder_name'] = $val['name'];
-                            }
-                        }
-                    }
+                    $folder = $value;
                 }
             }
+        }
 
-            if (count($sortArray) > 0) {
-                $returnFolderList = $sortArray;
-            } else {
-                $returnFolderList = false;
+        if( empty($folder) ) {
+            return false;
+        }
+        $list_folder["folder"] = $folder;
+        $response2 = $mailin->getAllLists($folder["id"]);
+
+        if( empty($response2["lists"]) ) {
+            return $list_folder;
+        }
+
+        foreach ($response2["lists"] as $value) {
+            if (strtolower($value['name']) == 'magento') {
+                $list_folder["list"] = $value;
             }
         }
-        return $returnFolderList;
+        return $list_folder;
     }
 
     /**
@@ -401,24 +506,22 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     {
         $emailValue = $this->getSubscribeCustomer();
         $mediaUrl = $this->_storeManagerInterface->getStore()->getBaseUrl(\Magento\Framework\UrlInterface::URL_TYPE_MEDIA);
-        $apiKey = !empty($this->apiKey) ? $this->apiKey : $this->getDbData('api_key');
-        if ($emailValue > 0 && !empty($apiKey)) {
+        $this->updateDbData('import_old_user_status', -1);
+        if ($emailValue > 0) {
             $this->updateDbData('import_old_user_status', 1);
             $userDataInformation = array();
-            $listIdVal = explode('|', $listId);
-            $mailinObj = $this->createObjMailin($apiKey);
-            $userDataInformation['key'] = $apiKey;
-            $userDataInformation['url'] = $mediaUrl.'sendinblue_csv/ImportSubUsersToSendinblue.csv';
-            $userDataInformation['listids'] = $listIdVal; // $list;
-            $userDataInformation['notify_url'] = '';
+            $mailinObj = $this->createObjSibClient();
+            $userDataInformation['fileUrl'] = $mediaUrl.'sendinblue_csv/'.$this->getDbData('sendin_csv_file_name').'.csv';
+            $userDataInformation['listIds'] = array(intval($listId)); // $list;
             $responseValue = $mailinObj->importUsers($userDataInformation);
             $this->updateDbData('selected_list_data', trim($listId));
-            if (!empty($responseValue['data']['process_id'])) {
+            if( SendinblueSibClient::RESPONSE_CODE_ACCEPTED == $mailinObj->getLastResponseCode() ) {
                 $this->updateDbData('import_old_user_status', 0);
                 return 0;
             }
             return 1;
-        }        
+        }
+        return -1;
     }
 
     /**
@@ -461,6 +564,7 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
         }
 
         $newsLetterData = array();
+        $responseByMerge = array();
         $count = 0;
         $connection = $this->createDbConnection();
         $tblNewsletter = $this->tbWithPrefix('newsletter_subscriber');
@@ -494,6 +598,7 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
         $fileName = 'ImportContacts-'.time();
         $this->updateDbData('sendin_csv_file_name', $fileName);
         $handle = fopen($this->_dir->getPath('media').'/sendinblue_csv/'.$fileName.'.csv', 'w+');
+
         $headRow = array_keys($attributesName);
         array_splice($headRow, 0, 0, 'EMAIL');
         fwrite($handle, implode(';', $headRow)."\n");
@@ -619,22 +724,14 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     * @return: smtp details
     * @updated: 09-sep-2017
     */
-    public function templateDisplay($apiKey = false)
+    public function templateDisplay()
     {
-        if (!$apiKey) {
-            $apiKey = $this->_getValueDefault->getValue('sendinblue/api_key', \Magento\Store\Model\ScopeInterface::SCOPE_STORE);
+        $mailin = $this->createObjSibClient();
+        $response = $mailin->getAllEmailTemplates();
+        if( SendinblueSibClient::RESPONSE_CODE_OK == $mailin->getLastResponseCode() ) {
+            return $response;
         }
-
-        if (!empty($apiKey)) {
-            $mailin = $this->createObjMailin($apiKey);
-            $data = array( "type"=>"template",
-             "status"=>"temp_active",
-             "page"=>1,
-             "page_limit"=>100
-            );
-            $tempResult = $mailin->getCampaignsV2($data);
-            return $tempResult['data'];
-        }
+        return array("templates" => array(), "count" => 0);
     }
 
     /**
@@ -645,17 +742,13 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     * @return: number of sms remaining
     * @updated: 17-sept-2017
     */
-    public function getSmsCredit($apiKey = false)
+    public function getSmsCredit()
     {
-        if (!$apiKey) {
-            $apiKey = $this->_getValueDefault->getValue('sendinblue/api_key', \Magento\Store\Model\ScopeInterface::SCOPE_STORE);
-        }
-
-        if (!empty($apiKey)) {
-            $mailin = $this->createObjMailin($apiKey);
-            $dataResp = $mailin->getAccount();
-            foreach($dataResp['data'] as $accountVal) {
-                if($accountVal['plan_type'] == 'SMS') {
+        $mailin = $this->createObjSibClient();
+        $dataResp = $mailin->getAccount();
+        if (SendinblueSibClient::RESPONSE_CODE_OK === $mailin->getLastResponseCode()) {
+            foreach($dataResp['plan'] as $accountVal) {
+                if($accountVal['type'] == 'sms') {
                     return $accountVal['credits'];
                 }
             }
@@ -667,15 +760,11 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     */
     public function updateSender()
     {
-        $apiKey = $this->getDbData('api_key');
-        if (!empty($apiKey)) {
-            $mailin = $this->createObjMailin($apiKey);
-            $data = array( "option" => "" );
-            $response = $mailin->getSenders($data);
-            if($response['code'] == 'success') {
-                $senders = array('id' => $response['data']['0']['id'], 'from_name' => $response['data']['0']['from_name'], 'from_email' => $response['data']['0']['from_email']);
-                $this->updateDbData('sendin_sender_value', json_encode($senders));
-            }
+        $mailin = $this->createObjSibClient();
+        $response = $mailin->getSenders();
+        if ( SendinblueSibClient::RESPONSE_CODE_OK === $mailin->getLastResponseCode() ) {
+            $senders = array('id' => $response['senders'][0]['id'], 'from_name' => $response['senders'][0]['name'], 'from_email' => $response['senders'][0]['email']);
+            $this->updateDbData('sendin_sender_value', json_encode($senders));
         }
     }
 
@@ -689,28 +778,21 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     * @return: display dist in shopify
     * @updated: 24-may-2016
     */ 
-    public function checkFolderListDoubleoptin($apiKey)
+    public function checkFolderListDoubleoptin()
     {
-        if ($apiKey == '') {
-            return false;
-        }
-        
-        $mailin = $this->createObjMailin($apiKey);
-        $dataApi = array( "page" => 1,
-          "page_limit" => 50
-        );
+        $mailin = $this->createObjSibClient();
         $folderResp = array();
-        $folderResp = $mailin->getFolders($dataApi);
-        
+        $listResp = array();
+        $folderResp = $mailin->getFoldersAll();
         //folder id
         $sArray = array();
         $returnVal = false;
-        if (!empty($folderResp['data']['folders'])) {
-            foreach ($folderResp['data']['folders'] as $value) {
+        if (!empty($folderResp['folders'])) {
+            foreach ($folderResp['folders'] as $value) {
                 if (strtolower($value['name']) == 'form') {
-                    
-                    if (!empty($value['lists'])) {
-                        foreach ($value['lists'] as $val) {
+                    $listResp = $mailin->getAllLists($value['id']);
+                    if (!empty($listResp['lists'])) {
+                        foreach ($listResp['lists'] as $val) {
                             if ($val['name'] == 'Temp - DOUBLE OPTIN') {
                                 $sArray['optin_id'] = $val['id'];
                             }
@@ -733,12 +815,12 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     public function trackingSmtp()
     {
         $smtpDetails = array();
-        $apiKey = $this->getDbData('api_key');
-        if (!empty($apiKey)) {
-            $mailin = $this->createObjMailin($apiKey);
-            $smtpDetails = $mailin->getSmtpDetails();
+        $mailinObj = $this->createObjSibClient();
+        $smtpDetails = $mailinObj->getAccount();
+        if (SendinblueSibClient::RESPONSE_CODE_OK === $mailinObj->getLastResponseCode()) {
             return $smtpDetails;
         }
+        return false;
     }
     /**
     * Delete sendiblue SMTP entry
@@ -761,10 +843,8 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     */
     public function importOrderhistory()
     {
-        $apiKey = $this->getDbData('api_key');
         $trackStatus = $this->getDbData('ord_track_status');
         $dateValue = !empty($this->getDbData('sendin_date_format')) ? $this->getDbData('sendin_date_format') : 'mm-dd-yyyy';
-        if ($trackStatus == 1 && !empty($apiKey)) {
             if (!is_dir($this->_dir->getPath('media').'/sendinblue_csv')) {
                 mkdir($this->_dir->getPath('media').'/sendinblue_csv', 0777, true);
             }
@@ -808,20 +888,17 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
             $this->updateDbData('order_import_status', 1);
             $listId = $this->getDbData('selected_list_data');
             $userDataInformation = array();
-            $listIdVal = explode('|', $listId);
-            $mailinObj = $this->createObjMailin($apiKey);
+            $listIdVal = array_map('intval', explode('|', $listId));
+            $mailinObj = $this->createObjSibClient();
             $baseUrl = $this->_storeManagerInterface->getStore()->getBaseUrl(\Magento\Framework\UrlInterface::URL_TYPE_MEDIA);
-            $userDataInformation['key'] = $apiKey;
-            $userDataInformation['url'] = $baseUrl.'sendinblue_csv/ImportOldOrdersToSendinblue.csv';
-            $userDataInformation['listids'] = $listIdVal; // $list;
-            $userDataInformation['notify_url'] = '';
+            $userDataInformation['fileUrl'] = $baseUrl.'sendinblue_csv/ImportOldOrdersToSendinblue.csv';
+            $userDataInformation['listIds'] = $listIdVal; // $list;
             $responseValue = $mailinObj->importUsers($userDataInformation);
-            if (!empty($responseValue['data']['process_id'])) {
-                $this->updateDbData('order_import_status', 0);
-                return 0;
+            if ( SendinblueSibClient::RESPONSE_CODE_ACCEPTED === $mailinObj->getLastResponseCode() ) {
+                return 1;
             }
-            return 1;
-        }
+            $this->updateDbData('order_import_status', 0);
+            return 0;
     }
 
     /**
@@ -835,8 +912,7 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
             $number = $number;
         }
 
-        $apiKey = $this->getDbData('api_key');
-        if(!empty($number) && !empty($apiKey)) {
+        if(!empty($number)) {
             $adminData = $this->getCurrentUser();
             $firstname = $adminData['firstname'];
             $lastname = $adminData['lastname'];
@@ -881,8 +957,7 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
             $number = $number;
         }
 
-        $apiKey = $this->getDbData('api_key');
-        if(!empty($number) && !empty($apiKey)) {
+        if(!empty($number)) {
             $adminData = $this->getCurrentUser();
             $firstname = $adminData['firstname'];
             $lastname = $adminData['lastname'];
@@ -927,8 +1002,7 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
             $number = $number;
         }
 
-        $apiKey = $this->getDbData('api_key');
-        if(!empty($number) && !empty($apiKey)) {
+        if(!empty($number)) {
             $adminData = $this->getCurrentUser();
             $firstname = $adminData['firstname'];
             $lastname = $adminData['lastname'];
@@ -955,27 +1029,28 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     */
     public function sendSmsApi($dataSms)
     {
-        $apiKey = $this->getDbData('api_key');
-        if (!empty($apiKey)) {
-            $mailin = $this->createObjMailin($apiKey);
-            $dataFinal = array( "to" => trim($dataSms['to']),
-                    "from" => trim($dataSms['from']),
-                    "text" => trim($dataSms['text']),
-                    "type" => trim($dataSms['type'])
-                );
-            $dataResp = $mailin->sendSms($dataFinal);
-
-            $remainingSms = !empty($dataResp['data']['remaining_credit']) ? $dataResp['data']['remaining_credit'] : 0;
+        $mailin = $this->createObjSibClient();
+        $dataFinal = array( "recipient" => trim($dataSms['to']),
+                "sender" => trim($dataSms['from']),
+                "content" => trim($dataSms['text']),
+                "type" => trim($dataSms['type']),
+                "source" => "api",
+                "plugin" => "sendinblue-magento-plugin"
+            );
+        $dataResp = $mailin->sendSms($dataFinal);
+        if (SendinblueSibClient::RESPONSE_CODE_CREATED === $mailin->getLastResponseCode()) {
             $notifyLimit = $this->getDbData('notify_value');
             $emailSendStatus = $this->getDbData('notify_email_send');
-            if (!empty($notifyLimit) && $remainingSms <= $notifyLimit && $emailSendStatus == 0) {
+            if (!empty($notifyLimit) && $dataResp['remainingCredits'] <= $notifyLimit && $emailSendStatus == 0) {
                 $smtpResult = $this->getDbData('relay_data_status');
                 if ($smtpResult == 'enabled') {
-                    $this->sendNotifySms($remainingSms);
+                    $this->sendNotifySms($dataResp['remainingCredits']);
                     $this->updateDbData('notify_email_send', 1);
                 }
             }
-            return !empty($dataResp['code']) ? $dataResp['code'] : 'fail';
+            return 'success';
+        } else {
+            return 'fail';
         }
     }
 
@@ -1031,11 +1106,8 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
         }
         if (!empty($senderCampaign) && !empty($senderCampaignMessage)) {
             $campName = 'SMS_' . date('Ymd');
-            $apiKey = $this->getDbData('api_key');
             $localeLangId = $this->getDbData('sendin_config_lang');
-            if ($apiKey == '') {
-                return false;
-            }
+
             if (strtolower($localeLangId) == 'fr') {
                 $firstName = '{PRENOM}';
                 $lastName = '{NOM}';
@@ -1048,20 +1120,22 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
             $content = str_replace('{last_name}', $lastName . "\r\n", $fname);
             $listId =  $this->getDbData('selected_list_data');
 
-            $listValue = explode('|', $listId);
+           $listValue = array_map('intval', explode('|', $listId));
 
-            if (!empty($apiKey)) {
-                $mailin = $this->createObjMailin($apiKey);
-                $data = array( "name" => $campName,
-                "sender" => $senderCampaign,
-                "content" => $content,
-                "listid" => $listValue,
-                "scheduled_date" => $scheduleTime,
-                "send_now" => 0
-                );
-                $campResponce = $mailin->createSmsCampaign($data);
+            $mailin = $this->createObjSibClient();
+            $data = array( "name" => $campName,
+            "sender" => $senderCampaign,
+            "content" => $content,
+            "recipients" => array("listIds" => $listValue),
+            "scheduledAt" => $scheduleTime
+            );
+            $campResponce = $mailin->createSmsCampaign($data);
+
+            if (SendinblueSibClient::RESPONSE_CODE_CREATED === $mailin->getLastResponseCode()) {
+                return 'success';
+            } else {
+                return 'fail';
             }
-            return $campResponce['code'];
         }
         return 'fail';
     }
@@ -1075,28 +1149,32 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
         $senderCampaign = $post['sender_campaign'];
         $senderCampaignMessage = $post['sender_campaign_message'];
         $smsCredit = $this->getSmsCredit();
+        $objectManager = \Magento\Framework\App\ObjectManager::getInstance();
         if (!empty($senderCampaign) && !empty($senderCampaignMessage) && $smsCredit >= 1) {
             $arr = array();
+            $mobile = '';
             $arr['from'] = $senderCampaign;
             
             $customerObj = $this->_customers->getCollection();
             foreach($customerObj as $customerObjdata ){
                 $billingId = $customerObjdata->getDefaultBilling();
-                $address = $objectManager->create('Magento\Customer\Model\Address')->load($billingId);
-                $smsValue = $address->getTelephone();
-                $countryId = $address->getCountry();
-                $firstName = $address->getFirstname();
-                $lastName = $address->getLastname();
-                $countryPrefix = $this->getCountryCode($countryId);
-                if(!empty($smsValue) && !empty($countryPrefix)) {
-                    $mobile = $this->checkMobileNumber($smsValue, $countryPrefix);
+                if (!empty($billingId)) {
+                    $address = $objectManager->create('Magento\Customer\Model\Address')->load($billingId);
+                    $smsValue = $address->getTelephone();
+                    $countryId = $address->getCountry();
+                    $firstName = $address->getFirstname();
+                    $lastName = $address->getLastname();
+                    $countryPrefix = $this->getCountryCode($countryId);
+                    if(!empty($smsValue) && !empty($countryPrefix)) {
+                        $mobile = $this->checkMobileNumber($smsValue, $countryPrefix);
+                    }
+                    $fname = str_replace('{first_name}', ucfirst($firstName), $senderCampaignMessage);
+                    $lname = str_replace('{last_name}', $lastName . "\r\n", $fname);
+                    $arr['text'] = $lname;
+                    $arr['to'] = $mobile;
+                    $arr['type'] = "transactional";
+                    $this->sendSmsApi($arr);
                 }
-                $fname = str_replace('{first_name}', ucfirst($firstName), $senderCampaignMessage);
-                $lname = str_replace('{last_name}', $lastName . "\r\n", $fname);
-                $arr['text'] = $lname;
-                $arr['to'] = $mobile;
-                $arr['type'] = "transactional";
-                $this->sendSmsApi($arr);
             }
             return 'success';
         }
@@ -1115,25 +1193,23 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
         $sendinConfirmType = $this->getDbData('confirm_type');
         if ($sendinConfirmType === 'doubleoptin') {
             $listId = $this->getDbData('optin_list_id');
-            $updateDataInSib['DOUBLE_OPT-IN'] = 2;
+            $updateDataInSib['DOUBLE_OPT-IN'] = '2';
         } else {
             $listId = $this->getDbData('selected_list_data');
         }
 
-        $apiKey = trim($this->getDbData('api_key'));
-        if (!empty($apiKey)) {
-            $mailin = $this->createObjMailin($apiKey);
+        $mailin = $this->createObjSibClient();
+        $updateDataInSib['sibInternalSource'] = self::PLUGIN_NAME;
 
-            $blacklistedValue = 0;
+        $data = array( "email" => $userEmail,
+        "attributes" => $updateDataInSib,
+        "emailBlacklisted" => false,
+        "internalUserHistory" => array( "action" => "SUBSCRIBE_BY_PLUGIN", "id" => 1, "name" => "magento2" ),
+        "updateEnabled" => true,
+        "listIds" => array_map('intval', explode('|', $listId))
+        );
 
-            $sibListId = explode('|', $listId);
-            $data = array( "email" => $userEmail,
-            "attributes" => $updateDataInSib,
-            "blacklisted" => $blacklistedValue,
-            "listid" => $sibListId
-            );
-            $mailin->createUpdateUser($data);
-        }        
+        $mailin->createUser($data);
     }
 
     /**
@@ -1161,14 +1237,8 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
             return false;
         }
         
-        $apiKey = trim($this->getDbData('api_key'));
-        if (!empty($apiKey)) {
-            $mailin = $this->createObjMailin($apiKey);
-
-            $data = array( "email" => $userEmail,
-                    "blacklisted" => 1);
-            $mailin->createUpdateUser($data);
-        }        
+        $mailin = $this->createObjSibClient();
+        $mailin->updateUser($userEmail, array('emailBlacklisted' => true, "smsBlacklisted" => true));
     }
 
     /**
@@ -1225,10 +1295,16 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
             $mail->addTo($userEmail);
             $mail->setSubject($title);
             $lang = $this->getDbData('sendin_config_lang');
+            if ($tempName == 'doubleoptin_temp') {
+                $bodyContent = $this->optinDefaultTemplate(strtolower($lang));
+            }
+            else if ($tempName == 'sendin_notification') {
+                $bodyContent = $this->sendinDefaultTemplate(strtolower($lang));
+            }
+            else if ($tempName == 'sendinsmtp_conf') {
+                $bodyContent = $this->smtpDefaultTemplate(strtolower($lang));
+            }
 
-            $path = $this->_blocktemp->getViewFileUrl('Sendinblue_Sendinblue::email_temp/'.strtolower($lang).'/'.$tempName.'.html');
-	    $path = str_replace('_view','Magento/backend', $path);
-            $bodyContent = file_get_contents($path);
             if (!empty($paramVal)) {
                 foreach($paramVal as $key=>$replaceVal) {
                     $bodyContent = str_replace($key, $replaceVal, $bodyContent);
@@ -1268,8 +1344,7 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     */
     public function sendWsTemplateMail($to)
     {
-        $key = $this->getDbData('api_key');
-        $mailin = $this->createObjMailin($key);
+        $mailin = $this->createObjSibClient();
 
         $sendinConfirmType = $this->getDbData('confirm_type');
         if (empty($sendinConfirmType) || $sendinConfirmType == 'nocon') {
@@ -1301,29 +1376,26 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
             $doubleOptinTempId = $this->getDbData('doubleoptin_template_id');
 
             if (intval($doubleOptinTempId) > 0) {
-                $data = array(
-                    'id' => $doubleOptinTempId
-                );
-                $response = $mailin->getCampaignV2($data);
-                if($response['code'] == 'success') {
-                    $htmlContent = $response['data'][0]['html_content'];
-                    if (trim($response['data'][0]['subject']) != '') {
-                        $subject = trim($response['data'][0]['subject']);
+                $response = $mailin->getTemplateById($doubleOptinTempId);
+                if( SendinblueSibClient::RESPONSE_CODE_OK == $mailin->getLastResponseCode() ) {
+                    $htmlContent = $response['htmlContent'];
+                    if (trim($response['subject']) != '') {
+                        $subject = trim($response['subject']);
                     }
-                    if (($response['data'][0]['from_name'] != '[DEFAULT_FROM_NAME]') &&
-                        ($response['data'][0]['from_email'] != '[DEFAULT_FROM_EMAIL]') &&
-                        ($response['data'][0]['from_email'] != '')) {
-                        $senderName = $response['data'][0]['from_name'];
-                        $senderEmail = $response['data'][0]['from_email'];
+                    if (($response['sender']['name'] != '[DEFAULT_FROM_NAME]') &&
+                        ($response['sender']['email'] != '[DEFAULT_FROM_EMAIL]') &&
+                        ($response['sender']['email'] != '')) {
+                        $senderName = $response['sender']['name'];
+                        $senderEmail = $response['sender']['email'];
                     }
-                    $transactionalTags = $response['data'][0]['campaign_name'];
+                    $transactionalTags = $response['name'];
                 }
             } else {
                 return $this->smtpSendMail($to, $title, $tempName, $paramVal);
             }
 
-            $to = array($to => '');
-            $from = array($senderEmail, $senderName);
+            $to = array(array("email" => $to));
+            $from = array("email" => $senderEmail, "name" => $senderName);
             $searchValue = "({{\s*doubleoptin\s*}})";
 
             $htmlContent = str_replace('{title}', $subject, $htmlContent);
@@ -1340,30 +1412,24 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
             $htmlContent = str_replace('{subscribe_url}', $pathResp, $htmlContent);
 
             $headers = array("Content-Type"=> "text/html;charset=iso-8859-1", "X-Mailin-tag"=>$transactionalTags );
-            $data = array( "to" => $to,
-                "cc" => array(),
-                "bcc" =>array(),
-                "from" => $from,
-                "replyto" => array(),
+            $data = array(
+                "to" => $to,
+                "sender" => $from,
                 "subject" => $subject,
-                "text" => '',
-                "html" => $htmlContent,
-                "attachment" => array(),
+                "htmlContent" => $htmlContent,
                 "headers" => $headers,
-                "inline_image" => array()
-            );
+           );
             return $mailin->sendEmail($data);
         }
 
         // should be the campaign id of template created on mailin. Please remember this template should be active than only it will be sent, otherwise it will return error.
-        if (!empty($key)) {
             $data = array();
-            $mailin = $this->createObjMailin($key);
-            $data = array( "id" => $templateId,
-              "to" => $to
-            );
+            $mailin = $this->createObjSibClient();
+
+            $data = array( "templateId" => intval($templateId),
+              "to" => array(array("email" => $to))
+             );
             $mailin->sendTransactionalTemplate($data);
-        }
     }
 
     /**
@@ -1371,16 +1437,13 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     * to user. 
     *
     */
-    public function sendOptinConfirmMailResponce($customerEmail, $finalId, $apiKey)
+    public function sendOptinConfirmMailResponce($customerEmail, $finalId)
     {
-        // should be the campaign id of template created on mailin. Please remember this template should be active than only it will be sent, otherwise it will return error.
-        if (!empty($apiKey)) {
-            $mailin = $this->createObjMailin($apiKey);
-            $data = array( "id" => $finalId,
-              "to" => $customerEmail
-            );
-            $mailin->sendTransactionalTemplate($data);
-        }
+        $mailin = $this->createObjSibClient();
+        $data = array( "templateId" => intval($finalId),
+              "to" => array(array("email" => $customerEmail))
+        );
+        $mailin->sendTransactionalTemplate($data);
     }
 
     /**
@@ -1462,24 +1525,6 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     }
 
     /**
-     * This method is used to check the subscriber's newsletter subscription status in Sendinblue
-     */
-    public function checkUserSendinStatus($result)
-    { 
-        $userStatus = array();
-        foreach ($result as $subscriber) {
-            $userStatus[] = $subscriber['email'];
-        }
-        $allUsers = array('users' => $userStatus );
-        $apiKey = $this->getDbData('api_key');
-        if (!empty($apiKey)) {
-            $mailin = $this->createObjMailin($apiKey);
-            $usersBlackListData = $mailin->getUsersBlacklistStatus($allUsers);
-        }
-        return $usersBlackListData;
-    }
-
-    /**
     *  This method is used to fetch total count subscribe users from the default newsletter table to list
     * them in the Sendinblue magento module.
     */
@@ -1536,7 +1581,44 @@ class SendinblueSib extends \Magento\Framework\Model\AbstractModel
     {
         return $this->_getTb->getTable($tableName);
     }
+    //get plugin version
+    public function checkPluginVersion()
+    {
+        $connection = $this->createDbConnection();
+        $tbModule = $this->tbWithPrefix('setup_module');
+        $pluginVersion = '';
+        $resultSubscriber = $connection->fetchAll("SELECT * FROM ".$tbModule." WHERE module = 'Sendinblue_Sendinblue'");
+        if (!empty($resultSubscriber['0']['data_version'])) {
+            $this->updateDbData('current_version', $resultSubscriber['0']['data_version']);
+            $pluginVersion = $resultSubscriber['0']['data_version'];
+        }
+        return $pluginVersion;
+    }
 
+    public function optinDefaultTemplate($lang)
+    {
+        if ($lang == "fr") {
+            return '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head> <meta content="text/html; charset=utf-8" http-equiv="Content-Type"> <title>{title}</title> </head> <body style="font-family: Arial, Helvetica, sans-serif;font-size: 12px;color: #222;"> <div class="moz-forward-container"> <br><table cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#ffffff"> <tbody> <tr style="border-collapse:collapse;"> <td align="center" style="border-collapse:collapse;"> <table cellspacing="0" cellpadding="0" border="0" width="570"> <tbody> <tr> <td height="20" style="line-height:0; font-size:0;"><img width="0" height="0" alt="{shop_name}" src="{shop_logo}"></td></tr></tbody> </table><table cellpadding="0" cellspacing="0" border="0" width="540"><tbody><tr><td style="line-height:0; font-size:0;" height="20"><div style="font-family:arial,sans-serif; color:#61a6f3; font-size:20px; font-weight:bold; line-height:28px;">Confirmez votre inscription</div></td></tr></tbody></table><table cellspacing="0" cellpadding="0" border="0" width="540"><tbody><tr><td align="left"><div style="font-family:arial,sans-serif; font-size:14px; margin:0; line-height:24px; color:#555555;"><br>Voulez vous recevoir les newsletters de{site_name}?<br><br><a href="{double_optin}" style="color:#ffffff;display:inline-block;font-family:Arial,sans-serif;width:auto;white-space:nowrap;min-height:32px;margin:5px 5px 0 0;padding:0 22px;text-decoration:none;text-align:center;font-weight:bold;font-style:normal;font-size:15px;line-height:32px;border:0;border-radius:4px;vertical-align:top;background-color:#3276b1" target="_blank"><span style="display:inline;font-family:Arial,sans-serif;text-decoration:none;font-weight:bold;font-style:normal;font-size:15px;line-height:32px;border:none;background-color:#3276b1;color:#ffffff">Oui, je confirme mon inscription</span></a><br><br>Si vous recevez cet email par erreur, vous pouvez simplement le supprimer. Vous ne serez pas inscrit à la newsletter si vous ne cliquez pas sur le lien de confirmation ci-dessus.<br><br>{site_name}</div></td></tr></tbody></table> </td></tr></tbody> </table> <br></div></body></html>';
+        }
+        return '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head> <meta content="text/html; charset=utf-8" http-equiv="Content-Type"> <title>{title}</title> </head> <body style="font-family: Arial, Helvetica, sans-serif;font-size: 12px;color: #222;"> <div class="moz-forward-container"> <br><table cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#ffffff"> <tbody> <tr style="border-collapse:collapse;"> <td align="center" style="border-collapse:collapse;"> <table cellspacing="0" cellpadding="0" border="0" width="570"> <tbody> <tr> <td height="20" style="line-height:0; font-size:0;"><img width="0" height="0" alt="{shop_name}" src="{shop_logo}"></td></tr></tbody> </table><table cellpadding="0" cellspacing="0" border="0" width="540"><tbody><tr><td style="line-height:0; font-size:0;" height="20"><div style="font-family:arial,sans-serif; color:#61a6f3; font-size:20px; font-weight:bold; line-height:28px;">Please confirm your subscription</div></td></tr></tbody></table><table cellspacing="0" cellpadding="0" border="0" width="540"><tbody><tr><td align="left"><div style="font-family:arial,sans-serif; font-size:14px; margin:0; line-height:24px; color:#555555;"><br>Do you want to receive newsletters from{site_name}?<br><br><a href="{double_optin}" style="color:#ffffff;display:inline-block;font-family:Arial,sans-serif;width:auto;white-space:nowrap;min-height:32px;margin:5px 5px 0 0;padding:0 22px;text-decoration:none;text-align:center;font-weight:bold;font-style:normal;font-size:15px;line-height:32px;border:0;border-radius:4px;vertical-align:top;background-color:#3276b1" target="_blank"><span style="display:inline;font-family:Arial,sans-serif;text-decoration:none;font-weight:bold;font-style:normal;font-size:15px;line-height:32px;border:none;background-color:#3276b1;color:#ffffff">Yes, subscribe me to this list.</span></a><br><br>If you received this email by mistake, simply delete it. You will not be subscribed to this list if you do not click the confirmation link above.<br><br>{site_name}</div></td></tr></tbody></table> </td></tr></tbody> </table> <br></div></body></html>';
+        
+    }
+
+    public function sendinDefaultTemplate($lang)
+    {
+        if ($lang == "fr") {
+            return '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"/><title>[Sendinblue] Alerte: Vos crédits SMS seront bientôt épuisés</title></head><body style="font-family: Arial, Helvetica, sans-serif;font-size: 12px;color: #222;"><div class="moz-forward-container"><br><table style="background-color:#ffffff" width="100%" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr style="border-collapse:collapse;"> <td style="border-collapse:collapse;" align="center"> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td valign="middle" align="left"> <h1 style="margin:0;color:#2f8bee;font-family:arial,sans-serif"><img src="http://img.sendinblue.com/14406/images/529f2339c6ece.png" alt="Sendinblue"></h1> </td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="540" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td align="left"> <div style="font-family:arial,sans-serif; color:#2f8bee; font-size:18px; font-weight:bold; margin:0 0 10px 0;">Bonjour,<br/><br/>Cet email est envoyé pour vous informer que vous n\'avez plus assez de crédits pour envoyer des SMS à partir de votre site Magento{site_name}.<br/><br/>Actuellement, vous avez{present_credit}crédits SMS.<br/><br/>Cordialement,<br/>L\'équipe de Sendinblue<br/> </div></td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr><tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="540" border="0" cellpadding="0" cellspacing="0"> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="10">&nbsp;</td></tr></tbody> </table> <table width="540" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="10">&nbsp;</td></tr><tr> <td valign="top" width="200" align="left"> <div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> <strong style="color:#2f8bee;">Sendinblue</strong></div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> 59 rue Beaubourg</div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> 75003 Paris - France</div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> T&eacute;l : 0899 25 30 61</div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> <a moz-do-not-send="true" href="http://www.sendinblue.com" style="color:#2f8bee;" target="_blank">www.sendinblue.com</a></div></td><td align="right" valign="top"><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:20px; color:#7e7e7e;"> <a href="http://www.facebook.com/SendinBlue" style="color:#2f8bee; text-decoration:none;" target="_blank"> <img alt="Facebook" src="https://my.sendinblue.com/public/upload/14406/images/523693143fe88.gif" style="border:none;"> </a> <a href="https://twitter.com/SendinBlue" style="color:#2f8bee; text-decoration:none;" target="_blank"> <img alt="Twitter" src="https://my.sendinblue.com/public/upload/14406/images/5236931746c01.gif" style="border:none;"> </a> <a href="http://www.linkedin.com/company/mailin" style="color:#2f8bee; text-decoration:none;" target="_blank"> <img alt="Linkedin" src="https://my.sendinblue.com/public/upload/14406/images/5236931ad253b.gif" style="border:none;"> </a> <a href="http://sendinblue.tumblr.com/" style="color:#2f8bee; text-decoration:none;" target="_blank">Blog</a></div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;"> &copy; 2014-2015 Sendinblue, tous droits r&eacute;serv&eacute;s. </div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;"> Ceci est un message automatique g&eacute;n&eacute;r&eacute; par Sendinblue. </div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;"> Ne pas y r&eacute;pondre, vous ne recevriez aucune r&eacute;ponse. </div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;"><a href="https://www.sendinblue.com/legal/antispampolicy" style="color:#7e7e7e;" target="_blank">Politique anti-spam &amp; emailing</a> | <a href="https://www.sendinblue.com/legal/generalterms" style="color:#7e7e7e;" target="_blank">Conditions g&eacute;n&eacute;rales de ventes</a></div></td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr><tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> </td></tr></tbody> </table> <br></div></body></html>';
+        }
+        return '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"/><title>[Sendinblue] Alert: You do not have enough credits SMS</title></head><body style="font-family: Arial, Helvetica, sans-serif;font-size: 12px;color: #222;"><div class="moz-forward-container"><br><table style="background-color:#ffffff" width="100%" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr style="border-collapse:collapse;"> <td style="border-collapse:collapse;" align="center"> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td valign="middle" align="left"> <h1 style="margin:0;color:#2f8bee;font-family:arial,sans-serif"><img src="http://img.sendinblue.com/14406/images/529f2339c6ece.png" alt="Sendinblue"></h1> </td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="540" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td align="left"> <div style="font-family:arial,sans-serif; color:#2f8bee; font-size:18px; font-weight:bold; margin:0 0 10px 0;">Hello,<br/><br/>This email is sent to inform you that you do not have enough credits to send SMS from your Magento website{site_name}.<br/><br/>Actually, you have{present_credit}credits sms.<br/><br/>Regards,<br/>Sendinblue team<br/> </div></td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr><tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="540" border="0" cellpadding="0" cellspacing="0"> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="10">&nbsp;</td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> </table> <table width="540" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="10">&nbsp;</td></tr><tr> <td align="left" valign="top" width="200"> <div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> <strong style="color:#2f8bee;">Sendinblue</strong> </div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> 59 rue Beaubourg</div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> 75003 Paris - France</div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> Tél : 0899 25 30 61</div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> <a moz-do-not-send="true" href="http://www.sendinblue.com" style="color:#2f8bee;" target="_blank">www.sendinblue.com</a> </div></td><td align="right" valign="top"><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:20px; color:#7e7e7e;"> <a href="http://www.facebook.com/SendinBlue" style="color:#2f8bee; text-decoration:none;" target="_blank"> <img alt="Facebook" src="https://my.sendinblue.com/public/upload/14406/images/523693143fe88.gif" style="border:none;"> </a> <a href="https://twitter.com/SendinBlue" style="color:#2f8bee; text-decoration:none;" target="_blank"> <img alt="Twitter" src="https://my.sendinblue.com/public/upload/14406/images/5236931746c01.gif" style="border:none;"> </a> <a href="http://www.linkedin.com/company/mailin" style="color:#2f8bee; text-decoration:none;" target="_blank"> <img alt="Linkedin" src="https://my.sendinblue.com/public/upload/14406/images/5236931ad253b.gif" style="border:none;"> </a> <a href="http://sendinblue.tumblr.com/" style="color:#2f8bee; text-decoration:none;" target="_blank">Blog</a></div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;"> © 2014-2015 Sendinblue, all rights reserved.</div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;">This is an automatic message generated by Sendinblue.</div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;">Do not respond, you would not receive any answer.</div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;"><a href="https://www.sendinblue.com/legal/antispampolicy" style="color:#7e7e7e;" target="_blank">Anti-spam & emailing policy</a> | <a href="https://www.sendinblue.com/legal/generalterms" style="color:#7e7e7e;" target="_blank">General Terms and Conditions</a></div></td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr><tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> </td></tr></tbody> </table> <br></div></body></html>';
+    }
+
+    public function smtpDefaultTemplate($lang)
+    {
+        if ($lang == "fr") {
+            return '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"/><title>[Sendinblue SMTP] e-mail de test</title></head><body style="font-family: Arial, Helvetica, sans-serif;font-size: 12px;color: #222;"><div class="moz-forward-container"><br><table style="background-color:#ffffff" width="100%" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr style="border-collapse:collapse;"> <td style="border-collapse:collapse;" align="center"> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td valign="middle" align="left"> <h1 style="margin:0;color:#2f8bee;font-family:arial,sans-serif"><img src="http://img.sendinblue.com/14406/images/529f2339c6ece.png" alt="Sendinblue"></h1> </td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="540" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td align="left"> <div style="font-family:arial,sans-serif; color:#2f8bee; font-size:18px; font-weight:bold; margin:0 0 10px 0;">Cet e-mail a été envoyé via Sendinblue SMTP. <br/> Félicitations, la fonctionnalité Sendinblue SMTP est bien configurée. </div></td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr><tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="540" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td align="right"> <div style="font-family:arial,sans-serif; font-size:14px; color:#2f8bee; margin:0; font-weight:bold; line-height:18px;"> L\'&eacute;quipe de Sendinblue</div></td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="10">&nbsp;</td></tr></tbody> </table> <table width="540" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="10">&nbsp;</td></tr><tr> <td valign="top" width="200" align="left"> <div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> <strong style="color:#2f8bee;">Sendinblue</strong></div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> 59 rue Beaubourg</div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> 75003 Paris - France</div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> T&eacute;l : 0899 25 30 61</div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> <a moz-do-not-send="true" href="http://www.sendinblue.com" style="color:#2f8bee;" target="_blank">www.sendinblue.com</a></div></td><td align="right" valign="top"><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:20px; color:#7e7e7e;"> <a href="http://www.facebook.com/SendinBlue" style="color:#2f8bee; text-decoration:none;" target="_blank"> <img alt="Facebook" src="https://my.sendinblue.com/public/upload/14406/images/523693143fe88.gif" style="border:none;"> </a> <a href="https://twitter.com/SendinBlue" style="color:#2f8bee; text-decoration:none;" target="_blank"> <img alt="Twitter" src="https://my.sendinblue.com/public/upload/14406/images/5236931746c01.gif" style="border:none;"> </a> <a href="http://www.linkedin.com/company/mailin" style="color:#2f8bee; text-decoration:none;" target="_blank"> <img alt="Linkedin" src="https://my.sendinblue.com/public/upload/14406/images/5236931ad253b.gif" style="border:none;"> </a> <a href="http://sendinblue.tumblr.com/" style="color:#2f8bee; text-decoration:none;" target="_blank">Blog</a></div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;"> &copy; 2014-2015 Sendinblue, tous droits r&eacute;serv&eacute;s. </div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;"> Ceci est un message automatique g&eacute;n&eacute;r&eacute; par Sendinblue. </div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;"> Ne pas y r&eacute;pondre, vous ne recevriez aucune r&eacute;ponse. </div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;"><a href="https://www.sendinblue.com/legal/antispampolicy" style="color:#7e7e7e;" target="_blank">Politique anti-spam &amp; emailing</a> | <a href="https://www.sendinblue.com/legal/generalterms" style="color:#7e7e7e;" target="_blank">Conditions g&eacute;n&eacute;rales de ventes</a></div></td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr><tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> </td></tr></tbody> </table> <br></div></body></html>';
+        }
+            return '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"/><title>[Sendinblue SMTP] test email</title></head><body style="font-family: Arial, Helvetica, sans-serif;font-size: 12px;color: #222;"><div class="moz-forward-container"><br><table style="background-color:#ffffff" width="100%" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr style="border-collapse:collapse;"> <td style="border-collapse:collapse;" align="center"> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td valign="middle" align="left"> <h1 style="margin:0;color:#2f8bee;font-family:arial,sans-serif"><img src="http://img.sendinblue.com/14406/images/529f2339c6ece.png" alt="Sendinblue"></h1> </td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="540" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td align="left"> <div style="font-family:arial,sans-serif; color:#2f8bee; font-size:18px; font-weight:bold; margin:0 0 10px 0;">This email has been sent using Sendinblue SMTP. <br/> Congratulations, your Sendinblue SMTP module has been set up well. </div></td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr><tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="540" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td align="right"> <div style="font-family:arial,sans-serif; font-size:14px; color:#2f8bee; margin:0; font-weight:bold; line-height:18px;">Sendinblue Team</div></td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="10">&nbsp;</td></tr></tbody> </table> <table width="540" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="10">&nbsp;</td></tr><tr> <td valign="top" width="200" align="left"> <div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> <strong style="color:#2f8bee;">Sendinblue</strong></div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> 59 rue Beaubourg</div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> 75003 Paris - France</div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> T&eacute;l : 0899 25 30 61</div><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:16px; color:#7e7e7e;"> <a moz-do-not-send="true" href="http://www.sendinblue.com" style="color:#2f8bee;" target="_blank">www.sendinblue.com</a></div></td><td align="right" valign="top"><div style="font-family:arial,sans-serif; font-size:12px; margin:0; line-height:20px; color:#7e7e7e;"> <a href="http://www.facebook.com/SendinBlue" style="color:#2f8bee; text-decoration:none;" target="_blank"> <img alt="Facebook" src="https://my.sendinblue.com/public/upload/14406/images/523693143fe88.gif" style="border:none;"> </a> <a href="https://twitter.com/SendinBlue" style="color:#2f8bee; text-decoration:none;" target="_blank"> <img alt="Twitter" src="https://my.sendinblue.com/public/upload/14406/images/5236931746c01.gif" style="border:none;"> </a> <a href="http://www.linkedin.com/company/mailin" style="color:#2f8bee; text-decoration:none;" target="_blank"> <img alt="Linkedin" src="https://my.sendinblue.com/public/upload/14406/images/5236931ad253b.gif" style="border:none;"> </a> <a href="http://sendinblue.tumblr.com/" style="color:#2f8bee; text-decoration:none;" target="_blank">Blog</a></div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;"> © 2014-2015 Sendinblue, all rights reserved.</div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;">This is an automatic message generated by Sendinblue.</div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;">Do not respond, you wouldn\'t receive any answer.</div><div style="font-family:arial,sans-serif; font-size:10px; margin:0; line-height:14px; color:#7e7e7e;"><a href="https://www.sendinblue.com/legal/antispampolicy" style="color:#7e7e7e;" target="_blank">Anti-spam & emailing policy</a> | <a href="https://www.sendinblue.com/legal/generalterms" style="color:#7e7e7e;" target="_blank">General Terms and Conditions</a></div></td></tr></tbody> </table> <table width="570" border="0" cellpadding="0" cellspacing="0"> <tbody> <tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr><tr> <td style="line-height:0; font-size:0;" height="20">&nbsp;</td></tr></tbody> </table> </td></tr></tbody> </table> <br></div></body></html>';        
+    }
 //end class
 }
 

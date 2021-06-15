@@ -15,8 +15,13 @@
     <event name="sales_order_shipment_save_after">
         <observer name="shipped_obs" instance="Sendinblue\Sendinblue\Observer\SibShipObserver"/>
     </event>
+    <event name="checkout_cart_product_add_after">
+        <observer name="addtocart_obs" instance="Sendinblue\Sendinblue\Observer\SibCartObserver"/>
+    </event>
+    <event name="sales_quote_remove_item">
+        <observer name="addtocart_obs" instance="Sendinblue\Sendinblue\Observer\SibCartObserver"/>
+    </event>
+    <event name="checkout_cart_update_items_after">
+        <observer name="addtocart_obs" instance="Sendinblue\Sendinblue\Observer\SibCartObserver"/>
+    </event>
 </config>
-
-
-
- 
